@@ -30,17 +30,17 @@ object MyPrefixSpanExample {
       }.zipWithIndex().map{tupl=>(tupl._2, tupl._1)}
 
     val postfix = new Postfix(Array(
-      new Item(0,-1),new Item(1,0),
-      new Item(0,-1),new Item(1,120),
-      new Item(0,-1),new Item(2,140),
-      new Item(0,-1),new Item(3,150),
-      new Item(0,-1),new Item(1,180),
-      new Item(0,-1),new Item(2,200),
-      new Item(0,-1),new Item(3,220),
+      new Item(),new Item(1,0),
+      new Item(),new Item(1,120),
+      new Item(),new Item(2,140),
+      new Item(),new Item(3,150),
+      new Item(),new Item(1,180),
+      new Item(),new Item(2,200),
+      new Item(),new Item(3,220),
       //new Item(0,-1),new Item(2,130),
       //new Item(0,-1),new Item(3,150),
       //new Item(0,-1),new Item(1,180),
-      new Item(0,-1)),
+      new Item()),
       60, 0, Array(), -1, 0)
 
     val prefix = new Prefix(Array(0,1,0,2),2, mutable.Map.empty)
@@ -56,7 +56,7 @@ object MyPrefixSpanExample {
     System.in.read()
 */
     val sparkDataFramePrefixSpan = new PrefixSpan()
-
+/*
     val result = new MyPrefixSpan()
       .setMinSupport(0.4)
       .setMaxPatternLength(50)
@@ -74,7 +74,7 @@ object MyPrefixSpanExample {
       println()
     }
     // $example off$
-
+*/
     //result.printSchema()
     /*
     root

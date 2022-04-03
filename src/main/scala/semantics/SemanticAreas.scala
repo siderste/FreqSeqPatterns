@@ -10,7 +10,7 @@ import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
-import patterns.Item
+import patterns.{Item, TrajOfItems}
 import preprocess.DatasetStatistics
 
 import scala.collection.Map
@@ -51,10 +51,11 @@ object SemanticAreas extends Serializable {
       .groupBy(col("entry"),col("hashValue")).agg(collect_set(col("ridA")).as("ridAs"),collect_set(col("ridB")).as("ridBs"))
       .select(col("entry"),col("hashValue"),array_union(col("ridAs"),col("ridBs")).as("rids"))
 
-    //either with self join or not, just change: transformedDatasetA to initialClustersDF -> ok
+    //either with self join or not, just change:
+    // ->>> transformedDatasetA to initialClustersDF -> ok
     //also try repartition with only the hashValue not the entry -> done pretty much the same as hashValue is outnumbering the entry
     //why when doing self-join repartition returns the default 200??? ->
-    val clusters = transformedDatasetA.repartition(transformedDatasetA.count().toInt/*,col("entry")*/,col("hashValue")).rdd.map(r=>{ //count run in 200 partitions
+    val clusters = transformedDatasetA.repartition(col("hashValue")).rdd.map(r=>{ //count run in 200 partitions
       val entry = r.getAs[Int]("entry")
       val hashValue=r.getAs[DenseVector]("hashValue")
       val rids=r.getAs[collection.mutable.WrappedArray[String]]("rids")
@@ -93,8 +94,8 @@ object SemanticAreas extends Serializable {
     val params = bcDatasetStatistics.value.params
     val meanShift = MsLsh
     //apply the MS LSH algorithm
-    val model = meanShift.train(spark.sparkContext, data, k=7, epsilon1=0.05.toDouble,
-      epsilon2=0.05.toDouble, epsilon3=0.07.toDouble, ratioToStop=1.0, yStarIter=10.toInt, cmin=3.toInt,
+    val model = meanShift.train(spark.sparkContext, data, k=7, epsilon1=0.05,
+      epsilon2=0.05, epsilon3=0.07.toDouble, ratioToStop=1.0, yStarIter=10.toInt, cmin=3.toInt,
       normalisation="true".toBoolean, w=1, nbseg=7, nbblocs1=10.toInt, nbblocs2=5.toInt, nbLabelIter=1.toInt)
 
     //get clusters of each vector as map
@@ -180,25 +181,23 @@ object SemanticAreas extends Serializable {
     cellsToAreaIdMapAcc.value
   }
 
-  def transformToGAreasSeqsRDD(spark: SparkSession, datasetWithAreasDF: DataFrame): RDD[ (Long, Array[Array[Item]]) ] ={
+  def transformToGAreasSeqsRDD(spark: SparkSession, datasetWithAreasDF: DataFrame): RDD[(Long, Array[Array[Item]])] ={
     import org.apache.spark.sql.functions._
+    import spark.implicits._
     //TODO check efficiency
     datasetWithAreasDF.select("d_0","d_1","area_id")
       .withColumn("itemsArr", struct("d_1","area_id") )
       .groupBy("d_0").agg(sort_array(collect_list("itemsArr")).as("items") )
-      .rdd.map(row=>{
-        // "array(time","area_id")"
-        (row.getLong(0),
-          row.getAs[collection.mutable.WrappedArray[Row]]("items").toArray.map( r=>{Array(Item(r.getInt(1), r.getLong(0)))} )
-        )
-      })
+      //.as[TrajOfItems].as("trajOfItems")
+      // "array(time","area_id")"
+      .rdd.map(row=>{ (row.getLong(0), row.getAs[collection.mutable.WrappedArray[Row]]("items").toArray.map( r=>{Array(Item(r.getLong(0), r.getInt(1)))} ) ) })
   }
 
   def transformToAreasSeqsRDD(spark: SparkSession, datasetWithAreasDF: DataFrame): RDD[ (Long, Array[Array[Item]]) ] ={
     import org.apache.spark.sql.functions._
     //TODO check efficiency, map partitions
     datasetWithAreasDF.select("d_0","d_1","area_id").repartition(col("d_0")).rdd.map(r=>{
-      ( r.getLong(0), Array(Item(r.getInt(2), r.getLong(1))) )
+      ( r.getLong(0), Array(Item(r.getLong(1), r.getInt(2))) )
     }).reduceByKey{(array_1, array_2)=>
       Array.concat(array_1, array_2).sorted
     }.mapValues(m=>Array(m))

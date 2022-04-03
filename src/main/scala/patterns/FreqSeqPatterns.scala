@@ -1,13 +1,14 @@
 package patterns
 
+import org.apache.spark.mllib.fpm.{PrefixSpan, PrefixSpanModel}
 import org.apache.spark.mllib.clustering.dbscan.irvingc.{DBSCANLabeledPoint, DBSCANPoint, LocalDBSCANNaive}
 import org.apache.spark.mllib.clustering.meanshift.{DenseDoubleVector, DoubleVector, LocalMeanShift, PointWithTrajid}
 import org.apache.spark.mllib.clustering.msLsh.MsLsh
 import org.apache.spark.mllib.linalg.{Vector, Vectors}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.functions.col
+import org.apache.spark.sql.functions.{col, flatten, explode}
 import org.apache.spark.sql.types.{ArrayType, IntegerType, LongType, StructType}
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import preprocess.Parameters
 
 import java.util.List
@@ -60,9 +61,12 @@ object FreqSeqPatterns {
   }
 
 
-  def getVectorTransitionsToCluster(datasetPatternsTransitions: DataFrame)
+  def getVectorTransitionsToCluster(spark: SparkSession, datasetPatternsTransitions: DataFrame)
     :RDD[((String, Int), mutable.Map[Long, Array[Vector]])]= {
     //TODO costly????
+    import spark.implicits._
+    val t = datasetPatternsTransitions.select($"d_0",flatten($"pattern"),$"pattern",$"pattern_length",$"points_length",$"point_coords").take(10)
+
     datasetPatternsTransitions.rdd.map(row=>{
       var pattern = row.getAs[collection.mutable.WrappedArray[collection.mutable.WrappedArray[Int]]]("pattern")
         .toArray.map(r=>r.toArray.mkString("")).mkString(",")
@@ -99,23 +103,24 @@ object FreqSeqPatterns {
   }
 
 
-  def getTransitionsDFToCluster(spark: SparkSession, prefixSpanModel: MyPrefixSpanModel, datasetWithAreasDF: DataFrame) = {
-    val frequentPatterns = prefixSpanModel.freqSequences.filter(f=>f.instances.nonEmpty)
-
-    val freqPatternsRow = frequentPatterns.flatMap(freqSequence =>{
+  //def getTransitionsDFToCluster(spark: SparkSession, prefixSpanModel: MyPrefixSpanModel, datasetWithAreasDF: DataFrame) = { //old getTransitionsDFToCluster
+  def getTransitionsDFToCluster(spark: SparkSession, prefixSpanRows: RDD[Row], datasetWithAreasDF: DataFrame) = {
+    //val frequentPatterns = prefixSpanModel.freqSequences.filter(f=>f.instances.nonEmpty) //taking care inside MyPrefixSpan
+    /*
+    val freqPatternsRow = prefixSpanModel.freqSequences.flatMap(freqSequence =>{
       freqSequence.instances.keys.flatMap(sequenceid=>{
         freqSequence.instances(sequenceid).map(time=>{
           Row(sequenceid, time, freqSequence.sequence.length, freqSequence.freq, freqSequence.sequence)
         })
       })
     })
-
+    */
     val freqPatternsSchema = new StructType()
       .add("d_0", LongType, true).add("d_1", LongType, true)
       .add("pattern_length", IntegerType, true).add("pattern_freq", LongType, true)
       .add("pattern", ArrayType(ArrayType(IntegerType)), true)
 
-    val freqPatternsDF = spark.createDataFrame(freqPatternsRow, freqPatternsSchema)
+    val freqPatternsDF = spark.createDataFrame(prefixSpanRows, freqPatternsSchema)
 
     import org.apache.spark.sql.functions._
     val t1 = freqPatternsDF.join(datasetWithAreasDF, Seq("d_0","d_1"))
@@ -143,17 +148,37 @@ object FreqSeqPatterns {
       (vec, clid)  }}.collectAsMap() // not memory efficient
   }
 
-  def discoverFreqSeqPatterns( sequences: RDD[ (Long, Array[Array[Item]]) ], params: Parameters):  MyPrefixSpanModel={
+  //def discoverFreqSeqPatterns( data: RDD[(Long, Array[Array[Item]])], params: Parameters):  MyPrefixSpanModel={ // old discoverFreqSeqPatterns
+  def discoverFreqSeqPatterns( data: RDD[(Long, Array[Array[Item]])], params: Parameters):  RDD[Row]={
     val minSupport = params.getPropertyValue("minSupport").toDouble
     val maxPatternLength = params.getPropertyValue("maxPatternLength").toInt
     val maxLocalProjDBSize = params.getPropertyValue("maxLocalProjDBSize").toLong
     val maxDTofPatterns = params.getPropertyValue("maxDTofPatterns").toInt
 
+    //val sequences1 = data.select("trajOfItems").where(col("trajOfItems").isNotNull)
+    //val sequences = sequences1.rdd.map(r => (r.getAs[Long]("d_0"), r.getAs[collection.mutable.WrappedArray[Item]](1).toArray.map(item => Array(item))))  ///.cache()
+
+    val sequences=data
     new MyPrefixSpan()
       .setMinSupport(minSupport)
       .setMaxPatternLength(maxPatternLength)
       .setMaxLocalProjDBSize(maxLocalProjDBSize)
-      .setMaxDTofPatterns(maxDTofPatterns)
-      .run(sequences.cache())
+      .setMaxDTofPatterns(10000000)
+      .run(sequences)
+  }
+
+  def discoverFreqSeqPatternsOrig( sequences: RDD[ (Long, Array[Array[Item]]) ], params: Parameters):  PrefixSpanModel[Int]={
+    val minSupport = params.getPropertyValue("minSupport").toDouble
+    val maxPatternLength = params.getPropertyValue("maxPatternLength").toInt
+    val maxLocalProjDBSize = params.getPropertyValue("maxLocalProjDBSize").toLong
+
+    val sequencesAreas = sequences.map{r=>(
+      r._2.map{ar=>(ar.map{i=>(i.area_id)} )} )}
+
+    new PrefixSpan()
+      .setMinSupport(minSupport)
+      .setMaxPatternLength(maxPatternLength)
+      .setMaxLocalProjDBSize(maxLocalProjDBSize)
+      .run[Int](sequencesAreas.cache())
   }
 }

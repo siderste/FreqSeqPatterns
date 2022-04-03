@@ -38,13 +38,6 @@ object MainDraft extends Serializable{
       //.limit(2000)
     //clean the database from:
 
-
-    //play with apache sedonaa
-
-
-
-
-    //end of apache sedona
     val datasetStatistics = DataPreprocessing.calcStatistics(spark, datasetInitial, params)
     datasetStatistics.updMinMaxNomDims()
     datasetStatistics.countCellsPerDim()
@@ -142,16 +135,15 @@ object MainDraft extends Serializable{
     //postgres.writeOverwriteToDB(datasetWithAreasDF,"localhost","45436","siderDatacron","public","datasetWithAreasDF")
     start=System.nanoTime()
     //Step 2c: transform datasetInitial from points of dims sequences to (time, areas) sequences for prefixSpan
-    val sequences = SemanticAreas.transformToGAreasSeqsRDD(spark, datasetWithAreasDF).persist()
+    val sequences = SemanticAreas.transformToGAreasSeqsRDD(spark, datasetWithAreasDF) ///.persist()
     //val sequencesNew = SemanticAreas.transformToAreasSeqsRDD(spark, datasetWithAreasDF)
     //TODO merge nearBy-sequential Areas???
     timings.put("step2c", (System.nanoTime()-start)/1000000000)
 
     start=System.nanoTime()
     //Step 3: discover frequent sequential semantic areas patterns, along with pathlets of each
-    //val t = sequences.take(1000)
-    //timings.put("step3a", (System.nanoTime()-start)/1000000000)
     val prefixSpanModel = FreqSeqPatterns.discoverFreqSeqPatterns(sequences, bcDatasetStatistics.value.params)
+    //val prefixSpanModel = FreqSeqPatterns.discoverFreqSeqPatternsOrig(sequences, bcDatasetStatistics.value.params)
     //TODO what about Dt, inside prefixspan or segment trajectories in preprocessing???
     timings.put("step3", (System.nanoTime()-start)/1000000000)
 
@@ -168,21 +160,20 @@ object MainDraft extends Serializable{
 
     start=System.nanoTime()
     //val datasetPatternsTransitions2 = spark.read.table("TableName");
-    val patternTransitionsRDD = FreqSeqPatterns.getVectorTransitionsToCluster(datasetPatternsTransitions)
+    val patternTransitionsRDD = FreqSeqPatterns.getVectorTransitionsToCluster(spark, datasetPatternsTransitions)
     //comment out
     //postgres.writeOverwriteToDB(postgres.writeOverwriteRDDToDB(patternTransitionsRDD),"localhost","45436","siderDatacron","public","patternTransitionsRDD")
     timings.put("step4b", (System.nanoTime()-start)/1000000000)
 
     start=System.nanoTime()
     //val patternsAndClusters = FreqSeqPatterns.clusterTransitionsLocalDBSCAN(patternTransitionsRDD)
-    //patternsAndClusters.take(1)
     val patternsAndClusters2 = FreqSeqPatterns.clusterTransitionsLocalMeanShift(patternTransitionsRDD, bcDatasetStatistics.value.params)
     //comment out
-    //postgres.writeOverwriteToDB(postgres.writeOverwriteRDD2ToDB(patternsAndClusters2),"localhost","45436","siderDatacron","public","patternsAndClusters2")
+    postgres.writeOverwriteToDB(postgres.writeOverwriteRDD2ToDB(patternsAndClusters2),"localhost","45436","siderDatacron","public","patternsAndClusters2")
     patternsAndClusters2.take(1000 )
     timings.put("step4c", (System.nanoTime()-start)/1000000000)
 
     println("Done in (secs):"+timings.toString())
-    throw new NotImplementedError("operation not yet implemented")
+    throw new NotImplementedError("operation not yet implemented. END")
   }
 }

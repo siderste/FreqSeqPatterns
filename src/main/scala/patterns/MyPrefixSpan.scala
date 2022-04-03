@@ -144,7 +144,8 @@ class MyPrefixSpan private (
     * @return a [[PrefixSpanModel]] that contains the frequent patterns
     */
   //@Since("1.5.0")
-  def run(data: RDD[ (Long, Array[Array[Item]]) ]) : MyPrefixSpanModel
+  //def run(data: RDD[ (Long, Array[Array[Item]]) ]) : MyPrefixSpanModel //old run
+  def run(data: RDD[ (Long, Array[Array[Item]]) ]) : RDD[Row]
   = {
 
     if (data.getStorageLevel == StorageLevel.NONE) {
@@ -166,7 +167,9 @@ class MyPrefixSpan private (
     val dataInternalRepr = toDatabaseInternalRepr(data, itemToInt)
       .persist(StorageLevel.MEMORY_AND_DISK)
 
-    val results = genFreqPatterns(dataInternalRepr, freqItems, minCount, maxPatternLength, maxLocalProjDBSize, maxDToFPatterns)
+    val results /*RDD[(Prefix, Long)] = null */ = genFreqPatterns(dataInternalRepr, freqItems, minCount, maxPatternLength, maxLocalProjDBSize, maxDToFPatterns)
+
+    dataInternalRepr.unpersist(false)
 
     def toPublicRepr(pattern: Array[Int]): Array[Array[Int]] = {
       val sequenceBuilder = mutable.ArrayBuilder.make[Array[Int]]
@@ -189,11 +192,19 @@ class MyPrefixSpan private (
     }
 
     val freqSequences = results
-      .filter{case(p,_) => p.length > 1}//TODO should i keep the frequent patterns of length 1?? splitter do not==>so do we
-      .map { case (seq: Prefix, count: Long) =>
-        new FreqSequence(toPublicRepr(seq.items), count, seq.instances)
+      .filter{case(p,c) => p.length > 1 && p.instances.nonEmpty}//TODO should i keep the frequent patterns of length 1?? splitter do not==>so do we
+      .flatMap { case (seq: Prefix, count: Long) =>
+        seq.instances.keys.flatMap(sequenceid=>{
+          seq.instances(sequenceid).map(time=>{
+            val sequence = toPublicRepr(seq.items)
+            Row(sequenceid, time, sequence.length, count, sequence)
+          })
+        })
+        //new FreqSequence(toPublicRepr(seq.items), count, seq.instances) //old return
     }
-    new MyPrefixSpanModel(freqSequences)
+    freqSequences
+    //new MyPrefixSpanModel(freqSequences) //old return
+
   }
   /*
     /**
@@ -234,7 +245,7 @@ object MyPrefixSpan extends Logging {
     data.flatMap { itemsets =>
       val uniqItems = mutable.Set.empty[Int]
       //add all items of each itemset, we have only one item per itemset though
-      itemsets._2.foreach ( itemset => itemset.foreach (item => uniqItems += item.id ) )
+      itemsets._2.foreach ( itemset => itemset.foreach (item => uniqItems += item.area_id ) ) // Item is based on its id only not (id, time)
       uniqItems.toIterator.map((_, 1L))
     }.reduceByKey(_ + _).filter { case (_, count) =>
       count >= minCount
@@ -258,11 +269,11 @@ object MyPrefixSpan extends Logging {
     data.flatMap { itemsets =>
       val allItems = mutable.ArrayBuilder.make[Item]
       var containsFreqItems = false
-      allItems += new Item(0, -1)
+      allItems += new Item()
       itemsets._2.foreach { itemset =>
         val items = mutable.ArrayBuilder.make[Item]
         itemset.foreach { item => // as itemset is single plus timestamp in our context
-          if (itemToInt.contains(item.id)) {// if item is in itemToInt so is frequent
+          if (itemToInt.contains(item.area_id)) {// if item is in itemToInt so is frequent
             items += item // using 1-indexing in internal format
           }
         }
@@ -270,7 +281,7 @@ object MyPrefixSpan extends Logging {
         if (result.nonEmpty) {
           containsFreqItems = true
           allItems ++= result// .sorted //may not sorted if more than 1 item in itemset
-          allItems += new Item(0, -1)
+          allItems += new Item()
         }
       }
       if (containsFreqItems) {
@@ -299,7 +310,7 @@ object MyPrefixSpan extends Logging {
                                          maxDTofPatterns: Int)
                                   : RDD[(Prefix, Long)] = {
     val sc = data.sparkContext
-
+    var start=System.nanoTime()
     if (data.getStorageLevel == StorageLevel.NONE) {
       logWarning("Input data is not cached.")
     }
@@ -316,8 +327,7 @@ object MyPrefixSpan extends Logging {
     // Prefixes whose projected databases are large.
     var largePrefixes = mutable.Map(emptyPrefix.id -> emptyPrefix) // => size=1
     //TODO check initialPrefixes HERE
-
-    while (largePrefixes.nonEmpty) {
+    while (largePrefixes.nonEmpty) {println("while loop")
       val numLocalFreqPatterns = localFreqPatterns.length
       if (numLocalFreqPatterns > 1000000) {
         logWarning(
@@ -330,23 +340,25 @@ object MyPrefixSpan extends Logging {
       }
       val largePrefixArray = largePrefixes.values.toArray
       //TODO costly????
+      start=System.nanoTime()
       val myfreqPrefixes = postfixes.flatMap { postfix => {
         largePrefixArray.flatMap { prefix => {
           postfix.projectFull(prefix).filter(_.nonEmpty) //my version TODO MIND the multiple prefix case
-          .toIterator.flatMap{ post =>post.genPrefixItems } //my version
+          .flatMap{ post =>post.genPrefixItems } //my version
           .map { case (item, postfixSizeAndInstances ) =>
             ((prefix.id, item), (1L, postfixSizeAndInstances._1, mutable.Map(postfix.sequenceId-> postfixSizeAndInstances._2))) } //my version
         }}
       }}.reduceByKey { case ((seqsA, postfixSizeA, instancesA),
           (seqsB, postfixSizeB, instancesB)) => { //my version
           // TODO should mapA++mapB be enough ?? or => instances=instancesA++instancesB.map{case(k,v)=>k->(v++instancesA.getOrElse(k ,Iterable.Empty))}
-        ( (instancesA++instancesB).keys.size, postfixSizeA+postfixSizeB, instancesA++instancesB) //my version
-      }}.map{ case ((pid, item),(setsize, postsize, instances))=>{ //my version TODO remove map op ???
-        ((pid, item),(setsize, postsize, instances))
-      }}.filter { case (_, (c, _, _)) => c >= minCount }
+        ( (instancesA++instancesB).keys.size, postfixSizeA+postfixSizeB, instancesA++instancesB) }} //my version
+        ///.map{ case ((pid, item),(setsize, postsize, instances))=> ((pid, item),(setsize, postsize, instances)) } //my version TODO remove map op ???
+        .filter { case (_, (c, _, _)) => c >= minCount }
         .collect()
+      println(("step-myfreqPrefixes-after collect", (System.nanoTime()-start)/1000000000)) //
 
       val newLargePrefixes = mutable.Map.empty[Int, Prefix]
+      start=System.nanoTime()
       myfreqPrefixes.foreach { case ((id, item), (count, projDBSize, instances)) =>
         val newPrefix = largePrefixes(id) :+ (item, instances, maxDTofPatterns)
         localFreqPatterns.append( (newPrefix.close(), count) ) // 0 at the end
@@ -362,17 +374,19 @@ object MyPrefixSpan extends Logging {
       }
       largePrefixes = newLargePrefixes
     }
-    var freqPatterns = sc.parallelize(localFreqPatterns, 1)
+    println(("step-myfreqPrefixes-after while", (System.nanoTime()-start)/1000000000)) //
 
+    var freqPatterns = sc.parallelize(localFreqPatterns, 1)
     val numSmallPrefixes = smallPrefixes.size
     logInfo(s"number of small prefixes for local processing: $numSmallPrefixes")
     if (numSmallPrefixes > 0) {
       // Switch to local processing.
+      start=System.nanoTime()
       val bcSmallPrefixes = sc.broadcast(smallPrefixes)
       val distributedFreqPattern = postfixes.flatMap { postfix =>
         bcSmallPrefixes.value.values.flatMap { prefix =>
-          postfix.projectFull(prefix).filter(_.nonEmpty).toIterator.map{newpostfix=> //TODO MIND the multiple prefix case
-            (prefix.id, newpostfix)} //id here not increments, i guess cause is a broadcast variable
+          postfix.projectFull(prefix).filter(_.nonEmpty).toIterator
+            .map{newpostfix=> (prefix.id, newpostfix)} //TODO MIND the multiple prefix case  //id here not increments, i guess cause is a broadcast variable
         }//my case has flatmap as projectFull returns many postfixes for one input postfix
       }.groupByKey().flatMap { case (id, projPostfixes) =>
         val prefix = bcSmallPrefixes.value(id)
@@ -381,8 +395,10 @@ object MyPrefixSpan extends Logging {
         // TODO: of keeping them on shuffle files.
         localPrefixSpan.run(projPostfixes.toArray, maxDTofPatterns).map { case (pattern, count) =>
           (prefix ++ (pattern, maxDTofPatterns), count)
-        }.filter{case(_,cnt)=>cnt>= minCount} // as distributed merged prefixes with Dt might not be frequent as new prefix item
+        }.filter{case(p,cnt)=>cnt>= minCount} // as distributed merged prefixes with Dt might not be frequent as new prefix item
       }
+      println(("step-myfreqPrefixes-after local processing", (System.nanoTime()-start)/1000000000)) //
+      //throw new NotImplementedError("operation not yet implemented")
       // Union local frequent patterns and distributed ones.
       freqPatterns = freqPatterns ++ distributedFreqPattern
     }
@@ -521,7 +537,7 @@ object MyPrefixSpan extends Logging {
                                    val partialStarts: Array[Int] = Array.empty,
                                    var prevTimestamp: Long = -1,
                                    var sequenceId: Long = -1) extends Serializable {
-    require(items.last.id == 0, s"The last item in a postfix must be zero, but got ${items.last.id}.")
+    require(items.last.area_id == 0, s"The last item in a postfix must be zero, but got ${items.last.area_id}.")
     if (partialStarts.nonEmpty) {
       require(partialStarts.head >= start,
         "The first partial start cannot be smaller than the start index," +
@@ -529,7 +545,7 @@ object MyPrefixSpan extends Logging {
     }
 
     override def toString: String = {
-      "PostFix: items="+items.filter(p=>{p.id!=0}).mkString("[",",","]")+", start="+start+", partialStarts="+partialStarts+", prevTimestamp="+
+      "PostFix: items="+items.filter(p=>{p.area_id!=0}).mkString("[",",","]")+", start="+start+", partialStarts="+partialStarts+", prevTimestamp="+
         prevTimestamp+", sequenceId="+sequenceId
     }
     /**
@@ -537,7 +553,7 @@ object MyPrefixSpan extends Logging {
       */
     private[this] def fullStart: Int = {
       var i = start
-      while (items(i).id != 0) {
+      while (items(i).area_id != 0) {
         i += 1
       }
       i
@@ -565,29 +581,29 @@ object MyPrefixSpan extends Logging {
       // a) items that can be assembled to the last itemset of the prefix
       partialStarts.foreach { start =>
         var i = start
-        var x = -items(i).id
+        var x = -items(i).area_id
         while (x != 0) {
           if (!prefixes.contains(x)) {
-            if ( this.prevTimestamp == -1 || items(i).timestamp - this.prevTimestamp <= this.maxDTofPatterns ) {
-              prefixes(x) = (n1 - i, Set(items(i).timestamp))
+            if ( this.prevTimestamp == -1 || items(i).d_1 - this.prevTimestamp <= this.maxDTofPatterns ) {
+              prefixes(x) = (n1 - i, Set(items(i).d_1))
             }
           }
           i += 1
-          x = -items(i).id
+          x = -items(i).area_id
         }
       }
       // b) items that can be appended to the prefix
       var i = fullStart
       while (i < n1) {
-        val x = items(i).id
+        val x = items(i).area_id
         if (x != 0 ) {
           if( !prefixes.contains(x) ) {
-            if ( this.prevTimestamp == -1 || items(i).timestamp - this.prevTimestamp <= this.maxDTofPatterns ){
-              prefixes(x) = (n1 - i, Set(items(i).timestamp))
+            if ( this.prevTimestamp == -1 || items(i).d_1 - this.prevTimestamp <= this.maxDTofPatterns ){
+              prefixes(x) = (n1 - i, Set(items(i).d_1))
             }
           }else{// in full project, postfix size is larger if x is found again in postfix
             var newsize = prefixes(x)._1 + (n1-i)
-            var newInstances = prefixes(x)._2++Set(items(i).timestamp)
+            var newInstances = prefixes(x)._2++Set(items(i).d_1)
             prefixes(x) = (newsize, newInstances)// overwrite previous
           }
         }
@@ -616,19 +632,19 @@ object MyPrefixSpan extends Logging {
         val target = -prefix
         partialStarts.foreach { start =>
           var i = start
-          var x = items(i).id
+          var x = items(i).area_id
           while (x != target && x != 0) {
             i += 1
-            x = items(i).id
+            x = items(i).area_id
           }
           if (x == target) {
-            if ( this.prevTimestamp == -1 || items(i).timestamp - this.prevTimestamp <= this.maxDTofPatterns ) {
+            if ( this.prevTimestamp == -1 || items(i).d_1 - this.prevTimestamp <= this.maxDTofPatterns ) {
               i += 1
               if (!matched) {
                 newStart = i
                 matched = true
               }
-              if (items(i).id != 0) {
+              if (items(i).area_id != 0) {
                 newPartialStarts += i
               }
             }
@@ -641,14 +657,14 @@ object MyPrefixSpan extends Logging {
         val target = prefix
         var i = fullStart
         while (i < n1) {
-          val x = items(i).id
+          val x = items(i).area_id
           if (x == target) { // check every occurence
-            if ( this.prevTimestamp == -1 || items(i).timestamp - this.prevTimestamp <= this.maxDTofPatterns ) {
+            if ( this.prevTimestamp == -1 || items(i).d_1 - this.prevTimestamp <= this.maxDTofPatterns ) {
               if (!matched) {
                 newStart = i
                 matched = true // matched on first occurence
               }
-              if (items(i + 1).id != 0) {
+              if (items(i + 1).area_id != 0) {
                 newPartialStarts += i + 1
               }
             }
@@ -656,7 +672,7 @@ object MyPrefixSpan extends Logging {
           i += 1
         }
       }
-      new Postfix(items, maxDTofPatterns, newStart, newPartialStarts.result(), items(newStart).timestamp, sequenceId)
+      new Postfix(items, maxDTofPatterns, newStart, newPartialStarts.result(), items(newStart).d_1, sequenceId)
     }
 
     /**
@@ -725,7 +741,7 @@ object MyPrefixSpan extends Logging {
       //get places of prefix first in postfix
       var postfixplaces = ArrayBuffer[Int]()
       for (i <- 0 to this.items.length-1){
-        if (this.items(i).id==firstprefixitem) postfixplaces+=i
+        if (this.items(i).area_id==firstprefixitem) postfixplaces+=i
       }
       var partial = true
       var cur = this
@@ -791,7 +807,7 @@ object MyPrefixSpan extends Logging {
       */
     def compressed: Postfix = {
       if (start > 0) {
-        new Postfix(items.slice(start, items.length), maxDTofPatterns, 0, partialStarts.map(_ - start), items(start).timestamp, sequenceId)
+        new Postfix(items.slice(start, items.length), maxDTofPatterns, 0, partialStarts.map(_ - start), items(start).d_1, sequenceId)
       } else {
         this
       }
