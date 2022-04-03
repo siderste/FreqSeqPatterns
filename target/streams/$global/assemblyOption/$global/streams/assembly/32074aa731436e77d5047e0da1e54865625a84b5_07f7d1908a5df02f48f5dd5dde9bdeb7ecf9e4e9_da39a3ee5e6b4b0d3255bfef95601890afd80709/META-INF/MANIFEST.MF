@@ -1,0 +1,10 @@
+Manifest-Version: 1.0
+Implementation-Title: archery
+Implementation-Version: 0.4.0
+Specification-Vendor: org.spire-math
+Specification-Title: archery
+Implementation-Vendor-Id: org.spire-math
+Specification-Version: 0.4.0
+Implementation-URL: http://github.com/non/archery
+Implementation-Vendor: org.spire-math
+

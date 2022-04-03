@@ -1,0 +1,13 @@
+r510stelios@infolab2:~/hadoop-2.9.2/sbin$ ./start-dfs.sh
+r510stelios@infolab2:~/hadoop-2.9.2/sbin$ ./start-yarn.sh
+r510stelios@infolab2:~/hadoop-2.9.2/sbin$ hdfs dfs -ls /
+r510stelios@infolab2:~/hadoop-2.9.2/sbin$ hdfs dfs -put ~/a1day4class100objs.csv /input
+
+r510stelios@infolab2:~/spark-2.4.5-bin-hadoop2.7$ bin/spark-class org.apache.spark.deploy.master.Master
+
+r510stelios@infolab2:~/spark-2.4.5-bin-hadoop2.7$ bin/spark-class org.apache.spark.deploy.worker.Worker spark://192.168.43.40:7077 -m 8g -c 4
+
+r510stelios@infolab2:~/IdeaProjects/FreqSeqPatterns$ sbt clean compile assembly
+
+r510stelios@infolab2:~/spark-2.4.5-bin-hadoop2.7$ bin/spark-submit --master spark://192.168.43.40:7077 --num-executors 1 --executor-memory 2g --executor-cores 2 --driver-memory 3g --class MainDraft --driver-class-path postgresql-9.4.1207.jar --jars=/home/stylianos/Desktop/disk/infolab/IdeaProjects/FreqSeqPatterns/libs/postgresql-9.4.1207.jar --conf spark.driver.extraJavaOptions=-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005 /home/stylianos/Desktop/disk/infolab/IdeaProjects/FreqSeqPatterns/target/scala-2.11/FreqSeqPatterns-assembly-1.0.jar
+
