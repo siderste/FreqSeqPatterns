@@ -61,7 +61,7 @@ class PostgreSQL(spark: SparkSession) extends Serializable {
     df
   }
 
-  def writeOverwriteRDDToDB(patternTransitionsRDD: RDD[((String, Int), mutable.Map[Long, Array[linalg.Vector]])]): DataFrame = {
+  def writeOverwriteRDDToDB(patternTransitionsRDD: RDD[((String, Int), scala.collection.Map[Long, Array[linalg.Vector]])]): DataFrame = {
     import spark.implicits._
     val freqPatternsSchema = new StructType()
       .add("pattern", StringType, true)
@@ -75,6 +75,23 @@ class PostgreSQL(spark: SparkSession) extends Serializable {
       .select($"pattern",$"pattern_length", explode($"transitions"))
       .select($"pattern",$"pattern_length",$"key".as("trajectory"),explode($"value").as("points"))
       .withColumn("points", vecToSeq($"points"))
+    df.printSchema()
+    df
+  }
+
+  def writeOverwriteRDDClustersToDB(patternTransitionsRDD: RDD[((String, Int), collection.Map[Integer, Array[String]])]): DataFrame = {
+    import spark.implicits._
+    // RDD[((String, Int), Map[Integer, List[PointWithTrajid]])]
+    val freqPatternsSchema = new StructType()
+      .add("pattern", StringType, true)
+      .add("pattern_length", IntegerType, true)
+      .add("clusters", MapType(IntegerType, ArrayType( StringType )), true)
+    var all_rows = patternTransitionsRDD.map(row=>{
+      Row( row._1._1, row._1._2, row._2 )
+    })
+    var df = spark.createDataFrame(all_rows, freqPatternsSchema)
+      .select($"pattern",$"pattern_length", explode($"clusters"))
+      .select($"pattern",$"pattern_length",$"key".as("clustid"),explode($"value").as("trajid_points"))
     df.printSchema()
     df
   }

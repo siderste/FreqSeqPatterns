@@ -10,7 +10,7 @@ import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions._
-import patterns.{Item, TrajOfItems}
+import patterns.Item
 import preprocess.DatasetStatistics
 
 import scala.collection.Map
@@ -34,7 +34,7 @@ object SemanticAreas extends Serializable {
       .setNumHashTables(datasetStatistics.params.getPropertyValue("numOfHashTables").toInt)
       .setInputCol("features")
       .setOutputCol("hashes")
-    val model = mh.fit(data)
+    val model = mh.fit(data)  //  +  0.124 s
     val transformedDataset = model.transform(data)
       .select(col("rid"), col("features"), col("hashes"))
 
@@ -47,45 +47,29 @@ object SemanticAreas extends Serializable {
     val neighboursDF = model.approxSimilarityJoin(transformedDataset,transformedDataset,
       datasetStatistics.params.getPropertyValue("lshJoinThreshold").toDouble,"JaccardDistance").toDF()
     //TODO partition and load balancing?????
-    val initialClustersDF = neighboursDF.select(col("entry"),col("hashValue"),col("datasetA.rid").as("ridA"),col("datasetB.rid").as("ridB"))
-      .groupBy(col("entry"),col("hashValue")).agg(collect_set(col("ridA")).as("ridAs"),collect_set(col("ridB")).as("ridBs"))
+    val initialClustersDF = neighboursDF.select(col("entry"),col("hashValue"),col("datasetA.rid").as("ridA"),
+      col("datasetB.rid").as("ridB"))
+      .groupBy(col("entry"),col("hashValue"))
+      .agg(collect_set(col("ridA")).as("ridAs"),collect_set(col("ridB")).as("ridBs"))
       .select(col("entry"),col("hashValue"),array_union(col("ridAs"),col("ridBs")).as("rids"))
 
     //either with self join or not, just change:
     // ->>> transformedDatasetA to initialClustersDF -> ok
     //also try repartition with only the hashValue not the entry -> done pretty much the same as hashValue is outnumbering the entry
     //why when doing self-join repartition returns the default 200??? ->
-    val clusters = transformedDatasetA.repartition(col("hashValue")).rdd.map(r=>{ //count run in 200 partitions
+    val clusters = initialClustersDF.repartition(col("hashValue")).rdd.map(r=>{ //count run in 200 partitions   //   +  3.811 s  +  86.278 s
       val entry = r.getAs[Int]("entry")
       val hashValue=r.getAs[DenseVector]("hashValue")
       val rids=r.getAs[collection.mutable.WrappedArray[String]]("rids")
       //((entry, hashValue),(rids.toSet,Set[String]()))
       rids.toSet
-    }).aggregate(new ClusterAggregator())(//also try treeAggregate    aggregate though almost the same -> done
+    }).aggregate(new ClusterAggregator())(//also try treeAggregate    aggregate though almost the same -> done  //  127.512153 s
       seqOp = (agg, v) => agg.add(v),
       combOp = (agg1, agg2) => agg1.merge(agg2)
       //,2
     )
     //return non zero sets with every element having an id attached as Map[String, Int]
     clusters.all_clusters_toMap()
-
-    /* OLD STUFF
-    //process neighbors to clusters
-    //TODO costly operation, check partitioning....
-    val clusteringsMapAcc = new ClusteringsMapAccumulator()
-    spark.sparkContext.register(clusteringsMapAcc, "clusteringsMapAcc")
-    var clusterSize = clusteringsMapAcc.value.keys.size
-
-    neighboursDF//.repartition(spark.sparkContext.defaultParallelism) //TODO partition and load balancing?????
-      .foreachPartition{ partition=>partition
-        .foreach(row=>{
-          clusteringsMapAcc.add(row.getStruct(0).getAs[String]("rid"),
-            row.getStruct(1).getAs[String]("rid") )
-        })
-      }
-
-    clusteringsMapAcc.value
-    */
   }
 
 
@@ -181,26 +165,19 @@ object SemanticAreas extends Serializable {
     cellsToAreaIdMapAcc.value
   }
 
-  def transformToGAreasSeqsRDD(spark: SparkSession, datasetWithAreasDF: DataFrame): RDD[(Long, Array[Array[Item]])] ={
+  def transformToGAreasSeqsRDD(spark: SparkSession, datasetWithAreasDF: DataFrame): Dataset[(Long, Array[Array[Item]])] ={
     import org.apache.spark.sql.functions._
     import spark.implicits._
+    //implicit val myObjEncoder: Encoder[(Long, Array[Array[Item]])] = org.apache.spark.sql.Encoders.kryo[(Long, Array[Array[Item]])]
     //TODO check efficiency
-    datasetWithAreasDF.select("d_0","d_1","area_id")
-      .withColumn("itemsArr", struct("d_1","area_id") )
+    datasetWithAreasDF.select("d_0","d_1","area_id","d_2","d_3","d_4")
+      .withColumn("itemsArr", struct("d_1","area_id","d_2","d_3","d_4") )
       .groupBy("d_0").agg(sort_array(collect_list("itemsArr")).as("items") )
-      //.as[TrajOfItems].as("trajOfItems")
-      // "array(time","area_id")"
-      .rdd.map(row=>{ (row.getLong(0), row.getAs[collection.mutable.WrappedArray[Row]]("items").toArray.map( r=>{Array(Item(r.getLong(0), r.getInt(1)))} ) ) })
-  }
-
-  def transformToAreasSeqsRDD(spark: SparkSession, datasetWithAreasDF: DataFrame): RDD[ (Long, Array[Array[Item]]) ] ={
-    import org.apache.spark.sql.functions._
-    //TODO check efficiency, map partitions
-    datasetWithAreasDF.select("d_0","d_1","area_id").repartition(col("d_0")).rdd.map(r=>{
-      ( r.getLong(0), Array(Item(r.getLong(1), r.getInt(2))) )
-    }).reduceByKey{(array_1, array_2)=>
-      Array.concat(array_1, array_2).sorted
-    }.mapValues(m=>Array(m))
+      .map(row=>(row.getLong(0),
+        row.getAs[collection.mutable.WrappedArray[Row]]("items").toArray
+        .map( r=>Array( Item( r.getLong(0), r.getInt(1), Array( r.getDouble(2),r.getDouble(3),r.getDouble(4))) )
+        )
+      )) //(myObjEncoder)
   }
 
   def discoverSemAreasFromBisectingKMeans(spark: SparkSession, data: RDD[(String, Vector)],

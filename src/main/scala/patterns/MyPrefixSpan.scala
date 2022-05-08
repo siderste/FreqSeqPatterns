@@ -17,22 +17,20 @@
 
 package patterns
 
-import java.util.concurrent.atomic.AtomicInteger
-import java.{util => ju}
-
-import org.apache.log4j.LogManager
 import org.apache.spark.SparkContext
 import org.apache.spark.internal.Logging
-import org.apache.spark.mllib.fpm.PrefixSpan.logInfo
+import org.apache.spark.mllib.linalg.Vector
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.ScalaReflection
 import org.apache.spark.sql.types._
-import org.apache.spark.sql.{DataFrame, Row, SparkSession}
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
 import org.apache.spark.storage.StorageLevel
 import org.json4s.DefaultFormats
 import org.json4s.JsonDSL._
 import org.json4s.jackson.JsonMethods.{compact, render}
 
+import java.util.concurrent.atomic.AtomicInteger
+import java.{util => ju}
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
@@ -145,8 +143,11 @@ class MyPrefixSpan private (
     */
   //@Since("1.5.0")
   //def run(data: RDD[ (Long, Array[Array[Item]]) ]) : MyPrefixSpanModel //old run
-  def run(data: RDD[ (Long, Array[Array[Item]]) ]) : RDD[Row]
+  def run(dataset: Dataset[ (Long, Array[Array[Item]]) ], spark: SparkSession):  RDD[((Array[Array[Int]], Int), scala.collection.Map[Long, Array[Vector]])]
+  //def run(dataset: DataFrame, spark: SparkSession) : DataFrame
   = {
+
+    val data = dataset.rdd
 
     if (data.getStorageLevel == StorageLevel.NONE) {
       logWarning("Input data is not cached.")
@@ -167,7 +168,7 @@ class MyPrefixSpan private (
     val dataInternalRepr = toDatabaseInternalRepr(data, itemToInt)
       .persist(StorageLevel.MEMORY_AND_DISK)
 
-    val results /*RDD[(Prefix, Long)] = null */ = genFreqPatterns(dataInternalRepr, freqItems, minCount, maxPatternLength, maxLocalProjDBSize, maxDToFPatterns)
+    val results = genFreqPatterns(dataInternalRepr, freqItems, minCount, maxPatternLength, maxLocalProjDBSize, maxDToFPatterns)
 
     dataInternalRepr.unpersist(false)
 
@@ -192,19 +193,19 @@ class MyPrefixSpan private (
     }
 
     val freqSequences = results
-      .filter{case(p,c) => p.length > 1 && p.instances.nonEmpty}//TODO should i keep the frequent patterns of length 1?? splitter do not==>so do we
-      .flatMap { case (seq: Prefix, count: Long) =>
-        seq.instances.keys.flatMap(sequenceid=>{
-          seq.instances(sequenceid).map(time=>{
-            val sequence = toPublicRepr(seq.items)
-            Row(sequenceid, time, sequence.length, count, sequence)
-          })
+      .filter{case(p,c) => p.length > 1 && p.instances.nonEmpty}  //TODO should i keep the frequent patterns of length 1?? splitter do not==>so do we
+      .map { case (seq: Prefix, count: Long) =>
+        val sequence = toPublicRepr(seq.items)
+        val m = seq.instances.mapValues(setItems=>{
+          setItems.toArray.map(_.toSpatialDenseVector)
         })
+
+        ( (sequence,sequence.length), m )
+
         //new FreqSequence(toPublicRepr(seq.items), count, seq.instances) //old return
     }
     freqSequences
     //new MyPrefixSpanModel(freqSequences) //old return
-
   }
   /*
     /**
@@ -245,7 +246,7 @@ object MyPrefixSpan extends Logging {
     data.flatMap { itemsets =>
       val uniqItems = mutable.Set.empty[Int]
       //add all items of each itemset, we have only one item per itemset though
-      itemsets._2.foreach ( itemset => itemset.foreach (item => uniqItems += item.area_id ) ) // Item is based on its id only not (id, time)
+      itemsets._2.foreach ( itemset => itemset.foreach (item => uniqItems += item.area_id ) ) // Item is based on its area_id only
       uniqItems.toIterator.map((_, 1L))
     }.reduceByKey(_ + _).filter { case (_, count) =>
       count >= minCount
@@ -327,7 +328,7 @@ object MyPrefixSpan extends Logging {
     // Prefixes whose projected databases are large.
     var largePrefixes = mutable.Map(emptyPrefix.id -> emptyPrefix) // => size=1
     //TODO check initialPrefixes HERE
-    while (largePrefixes.nonEmpty) {println("while loop")
+    while (largePrefixes.nonEmpty) {
       val numLocalFreqPatterns = localFreqPatterns.length
       if (numLocalFreqPatterns > 1000000) {
         logWarning(
@@ -340,8 +341,7 @@ object MyPrefixSpan extends Logging {
       }
       val largePrefixArray = largePrefixes.values.toArray
       //TODO costly????
-      start=System.nanoTime()
-      val myfreqPrefixes = postfixes.flatMap { postfix => {
+      val myfreqPrefixes = postfixes.flatMap { postfix => {  // + 7.221 s
         largePrefixArray.flatMap { prefix => {
           postfix.projectFull(prefix).filter(_.nonEmpty) //my version TODO MIND the multiple prefix case
           .flatMap{ post =>post.genPrefixItems } //my version
@@ -354,11 +354,9 @@ object MyPrefixSpan extends Logging {
         ( (instancesA++instancesB).keys.size, postfixSizeA+postfixSizeB, instancesA++instancesB) }} //my version
         ///.map{ case ((pid, item),(setsize, postsize, instances))=> ((pid, item),(setsize, postsize, instances)) } //my version TODO remove map op ???
         .filter { case (_, (c, _, _)) => c >= minCount }
-        .collect()
-      println(("step-myfreqPrefixes-after collect", (System.nanoTime()-start)/1000000000)) //
+        .collect() // +1.988 s
 
       val newLargePrefixes = mutable.Map.empty[Int, Prefix]
-      start=System.nanoTime()
       myfreqPrefixes.foreach { case ((id, item), (count, projDBSize, instances)) =>
         val newPrefix = largePrefixes(id) :+ (item, instances, maxDTofPatterns)
         localFreqPatterns.append( (newPrefix.close(), count) ) // 0 at the end
@@ -374,7 +372,6 @@ object MyPrefixSpan extends Logging {
       }
       largePrefixes = newLargePrefixes
     }
-    println(("step-myfreqPrefixes-after while", (System.nanoTime()-start)/1000000000)) //
 
     var freqPatterns = sc.parallelize(localFreqPatterns, 1)
     val numSmallPrefixes = smallPrefixes.size
@@ -383,7 +380,7 @@ object MyPrefixSpan extends Logging {
       // Switch to local processing.
       start=System.nanoTime()
       val bcSmallPrefixes = sc.broadcast(smallPrefixes)
-      val distributedFreqPattern = postfixes.flatMap { postfix =>
+      val distributedFreqPattern = postfixes.flatMap { postfix =>  //  + 10.914 s
         bcSmallPrefixes.value.values.flatMap { prefix =>
           postfix.projectFull(prefix).filter(_.nonEmpty).toIterator
             .map{newpostfix=> (prefix.id, newpostfix)} //TODO MIND the multiple prefix case  //id here not increments, i guess cause is a broadcast variable
@@ -410,7 +407,7 @@ object MyPrefixSpan extends Logging {
     * @param items items in this prefix, using the internal format
     * @param length length of this prefix, not counting 0
     */
-  private[patterns] class Prefix(val items: Array[Int], val length: Int, val instances: mutable.Map[Long, Set[Long]])
+  private[patterns] class Prefix(val items: Array[Int], val length: Int, val instances: mutable.Map[Long, Set[Item]])
     extends Serializable {
     /** A unique id for this prefix. */
     val id: Int = Prefix.nextId
@@ -422,42 +419,44 @@ object MyPrefixSpan extends Logging {
       "PreFix: items="+items.mkString("[",",","]")+", instances="+instances.mkString("[",",","]")
     }
 
-    def merge(newInstances: mutable.Map[Long, Set[Long]],currLength:Int, newLength:Int, maxDTofPatterns: Int)
-      :mutable.Map[Long, Set[Long]] = {
+    def mergeTimely(newInstances: mutable.Map[Long, Set[Item]], currLength:Int, newLength:Int, maxDTofPatterns: Int)
+      :mutable.Map[Long, Set[Item]] = {
       //var log = LogManager.getRootLogger
       //log.warn("m merging:currentInstances="+instances.mkString("[",",","]")+" and newInstances="+newInstances.mkString("[",",","]"))
-      var result:mutable.Map[Long, Set[Long]] = mutable.Map.empty
+      var result:mutable.Map[Long, Set[Item]] = mutable.Map.empty
       if (instances.nonEmpty){
-        newInstances.keys.foreach(newKey=>{
-          if (instances.contains(newKey)){ //expected to be always true
-            var newTimes = newInstances(newKey).toBuffer.sorted
-            var newSet: Set[Long]=Set.empty
-            while (newTimes.nonEmpty){
-              var newTimesArray = newTimes.take(newLength)
-              var newTimesFirst = newTimesArray.head
-              var currTimes = instances(newKey).toBuffer.sorted
-              while(currTimes.nonEmpty && newTimes.nonEmpty) {
-                var currTimesArray = currTimes.take(currLength)
-                var bestTimes = currTimesArray.filter(prevTime => newTimesFirst - prevTime <= maxDTofPatterns && newTimesFirst - prevTime > 0)
-                if (bestTimes.size > 0) { //found candidates
-                  var best = bestTimes.max
-                  if (!newSet.contains(best)) {
-                    newSet = newSet ++ currTimesArray.toSet ++ newTimesArray.toSet //add nearest
+        newInstances.keys.foreach(newTraj=>{
+          if (instances.contains(newTraj)){ //expected to be always true
+            var newInstancesItems = newInstances(newTraj).toBuffer.sorted
+            var newSetInstances: Set[Item]=Set.empty
+            while (newInstancesItems.nonEmpty){
+              var newInstancesTimesArray = newInstancesItems.take(newLength)
+              var newInstancesTimesFirst = newInstancesTimesArray.head
+              var currInstancesTimes = instances(newTraj).toBuffer.sorted
+              while(currInstancesTimes.nonEmpty && newInstancesItems.nonEmpty) {
+                var currInstancesTimesArray = currInstancesTimes.take(currLength)
+                var bestInstnacesTimes = currInstancesTimesArray
+                  .filter(currInstanceTime => newInstancesTimesFirst.time - currInstanceTime.time <= maxDTofPatterns
+                    && newInstancesTimesFirst.time - currInstanceTime.time > 0)
+                if (bestInstnacesTimes.size > 0) { //found candidates
+                  var best = bestInstnacesTimes.max
+                  if (!newSetInstances.contains(best)) {
+                    newSetInstances = newSetInstances ++ currInstancesTimesArray.toSet ++ newInstancesTimesArray.toSet //add nearest
                   }
-                  newTimes = newTimes -- newTimesArray //remove found times
-                  if (newTimes.nonEmpty){
-                    newTimesArray = newTimes.take(newLength)
-                    newTimesFirst = newTimesArray.head
+                  newInstancesItems = newInstancesItems -- newInstancesTimesArray //remove found times
+                  if (newInstancesItems.nonEmpty){
+                    newInstancesTimesArray = newInstancesItems.take(newLength)
+                    newInstancesTimesFirst = newInstancesTimesArray.head
                   }
-                  currTimes = currTimes -- currTimesArray
+                  currInstancesTimes = currInstancesTimes -- currInstancesTimesArray
                 } else {
-                  currTimes = currTimes -- currTimesArray
+                  currInstancesTimes = currInstancesTimes -- currInstancesTimesArray
                 }
               }
-              newTimes = newTimes -- newTimesArray //remove checked times
-            }//next newTimes batch
-            //if (newSet.nonEmpty)
-              result.put(newKey,newSet)
+              newInstancesItems = newInstancesItems -- newInstancesTimesArray //remove checked times
+            }//next newInstancesItems batch
+            //if (newSetInstances.nonEmpty)
+              result.put(newTraj,newSetInstances)
           }
         })
       }else{
@@ -468,11 +467,11 @@ object MyPrefixSpan extends Logging {
     }
 
     /** Expands this prefix by the input item. */
-    def :+(item: Int, newInstances: mutable.Map[Long,  Set[Long]], maxDTofPatterns: Int): Prefix = {
+    def :+(item: Int, newInstances: mutable.Map[Long,  Set[Item]], maxDTofPatterns: Int): Prefix = {
       require(item != 0)
       //var log = LogManager.getRootLogger
       //log.warn("m prefix="+this.items.mkString("[",",","]")+", new item="+item )
-      var mergedInstances = merge(newInstances, length, 1, maxDTofPatterns)
+      var mergedInstances = mergeTimely(newInstances, length, 1, maxDTofPatterns)
       if (item < 0) {
         new Prefix(items :+ -item, length + 1, mergedInstances)
       } else {
@@ -490,7 +489,7 @@ object MyPrefixSpan extends Logging {
       var patternLength = pattern.items.filter(p=>p!=0).size
       //var log = LogManager.getRootLogger
       //log.warn("m prefix="+items.mkString("[",",","]")+", new pattern="+pattern.toSequence.mkString("[",",","]") )
-      var mergedInstances = merge(pattern.instances, length, patternLength, maxDTofPatterns)
+      var mergedInstances = mergeTimely(pattern.instances, length, patternLength, maxDTofPatterns)
       new Prefix(items++pattern.toSequence, length+patternLength, mergedInstances)
     }
   }
@@ -573,19 +572,19 @@ object MyPrefixSpan extends Logging {
       *         indicates a partial prefix item, which should be assembled to the last itemset of the
       *         current prefix. Otherwise, the item should be appended to the current prefix.
       */
-    def genPrefixItems: Iterator[(Int, (Long, Set[Long]))] = {
+    def genPrefixItems: Iterator[(Int, (Long, Set[Item]))] = {
       val n1 = items.length - 1
       // For each unique item (subject to sign) in this sequence, we output exact one split.
       // TODO: use PrimitiveKeyOpenHashMap
-      val prefixes = mutable.Map.empty[Int, (Long, Set[Long])]
+      val prefixes = mutable.Map.empty[Int, (Long, Set[Item])]
       // a) items that can be assembled to the last itemset of the prefix
       partialStarts.foreach { start =>
         var i = start
         var x = -items(i).area_id
         while (x != 0) {
           if (!prefixes.contains(x)) {
-            if ( this.prevTimestamp == -1 || items(i).d_1 - this.prevTimestamp <= this.maxDTofPatterns ) {
-              prefixes(x) = (n1 - i, Set(items(i).d_1))
+            if ( this.prevTimestamp == -1 || items(i).time - this.prevTimestamp <= this.maxDTofPatterns ) {
+              prefixes(x) = (n1 - i, Set(items(i)))
             }
           }
           i += 1
@@ -598,12 +597,12 @@ object MyPrefixSpan extends Logging {
         val x = items(i).area_id
         if (x != 0 ) {
           if( !prefixes.contains(x) ) {
-            if ( this.prevTimestamp == -1 || items(i).d_1 - this.prevTimestamp <= this.maxDTofPatterns ){
-              prefixes(x) = (n1 - i, Set(items(i).d_1))
+            if ( this.prevTimestamp == -1 || items(i).time - this.prevTimestamp <= this.maxDTofPatterns ){
+              prefixes(x) = (n1 - i, Set(items(i)))
             }
-          }else{// in full project, postfix size is larger if x is found again in postfix
+          }else{// prefix x exists in prefixes but in full project, postfix size is larger if x is found again in postfix
             var newsize = prefixes(x)._1 + (n1-i)
-            var newInstances = prefixes(x)._2++Set(items(i).d_1)
+            var newInstances = prefixes(x)._2++Set(items(i))
             prefixes(x) = (newsize, newInstances)// overwrite previous
           }
         }
@@ -638,7 +637,7 @@ object MyPrefixSpan extends Logging {
             x = items(i).area_id
           }
           if (x == target) {
-            if ( this.prevTimestamp == -1 || items(i).d_1 - this.prevTimestamp <= this.maxDTofPatterns ) {
+            if ( this.prevTimestamp == -1 || items(i).time - this.prevTimestamp <= this.maxDTofPatterns ) {
               i += 1
               if (!matched) {
                 newStart = i
@@ -659,7 +658,7 @@ object MyPrefixSpan extends Logging {
         while (i < n1) {
           val x = items(i).area_id
           if (x == target) { // check every occurence
-            if ( this.prevTimestamp == -1 || items(i).d_1 - this.prevTimestamp <= this.maxDTofPatterns ) {
+            if ( this.prevTimestamp == -1 || items(i).time - this.prevTimestamp <= this.maxDTofPatterns ) {
               if (!matched) {
                 newStart = i
                 matched = true // matched on first occurence
@@ -672,7 +671,7 @@ object MyPrefixSpan extends Logging {
           i += 1
         }
       }
-      new Postfix(items, maxDTofPatterns, newStart, newPartialStarts.result(), items(newStart).d_1, sequenceId)
+      new Postfix(items, maxDTofPatterns, newStart, newPartialStarts.result(), items(newStart).time, sequenceId)
     }
 
     /**
@@ -807,7 +806,7 @@ object MyPrefixSpan extends Logging {
       */
     def compressed: Postfix = {
       if (start > 0) {
-        new Postfix(items.slice(start, items.length), maxDTofPatterns, 0, partialStarts.map(_ - start), items(start).d_1, sequenceId)
+        new Postfix(items.slice(start, items.length), maxDTofPatterns, 0, partialStarts.map(_ - start), items(start).time, sequenceId)
       } else {
         this
       }
