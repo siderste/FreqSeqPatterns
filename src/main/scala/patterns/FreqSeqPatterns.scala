@@ -65,7 +65,6 @@ object FreqSeqPatterns {
     :RDD[((String, Int), Map[Long, Array[Vector]])]= {
     //:Dataset[((String, Int), mutable.Map[Long, Array[Vector]])]= {
     //TODO costly????
-
     //slicing points of each trajectory of each pattern and glue them to transitions
     datasetPatternsTransitions.map(row=>{
       var pattern = row._1._1.toArray.map(r=>r.toArray.mkString("")).mkString(",")

@@ -204,6 +204,13 @@ class MyPrefixSpan private (
 
         //new FreqSequence(toPublicRepr(seq.items), count, seq.instances) //old return
     }
+    /*
+    println("freqSequences=")
+    freqSequences.foreach{p=>
+      println("pattern="+p._1._1.mkString("Array(", ", ", ")")+", pat_len="+p._1._2+", traj-instances="+
+        p._2.foreach(t=>print("-traj="+t._1+", instances="+t._2.mkString("Array(", ", ", ")"))))
+    }
+    */
     freqSequences
     //new MyPrefixSpanModel(freqSequences) //old return
   }
@@ -345,13 +352,18 @@ object MyPrefixSpan extends Logging {
         largePrefixArray.flatMap { prefix => {
           postfix.projectFull(prefix).filter(_.nonEmpty) //my version TODO MIND the multiple prefix case
           .flatMap{ post =>post.genPrefixItems } //my version
-          .map { case (item, postfixSizeAndInstances ) =>
-            ((prefix.id, item), (1L, postfixSizeAndInstances._1, mutable.Map(postfix.sequenceId-> postfixSizeAndInstances._2))) } //my version
+          .map { case (item, postfixSizeAndInstances ) =>{
+            //println("postfixSizeAndInstances="+postfixSizeAndInstances._2.mkString("[",",","]"))
+            ((prefix.id, item), (1L, postfixSizeAndInstances._1, mutable.Map(postfix.sequenceId-> postfixSizeAndInstances._2))) }} //my version
         }}
       }}.reduceByKey { case ((seqsA, postfixSizeA, instancesA),
           (seqsB, postfixSizeB, instancesB)) => { //my version
           // TODO should mapA++mapB be enough ?? or => instances=instancesA++instancesB.map{case(k,v)=>k->(v++instancesA.getOrElse(k ,Iterable.Empty))}
-        ( (instancesA++instancesB).keys.size, postfixSizeA+postfixSizeB, instancesA++instancesB) }} //my version
+        //println("instancesA="+instancesA.mkString("[",",","]"))
+        //println("instancesB="+instancesB.mkString("[",",","]"))
+        var instancesC = instancesA++instancesB
+        //println("instancesC="+instancesC.mkString("[",",","]"))
+        ( instancesC.keys.size, postfixSizeA+postfixSizeB, instancesC) }} //my version
         ///.map{ case ((pid, item),(setsize, postsize, instances))=> ((pid, item),(setsize, postsize, instances)) } //my version TODO remove map op ???
         .filter { case (_, (c, _, _)) => c >= minCount }
         .collect() // +1.988 s
@@ -394,10 +406,20 @@ object MyPrefixSpan extends Logging {
           (prefix ++ (pattern, maxDTofPatterns), count)
         }.filter{case(p,cnt)=>cnt>= minCount} // as distributed merged prefixes with Dt might not be frequent as new prefix item
       }
-      println(("step-myfreqPrefixes-after local processing", (System.nanoTime()-start)/1000000000)) //
+      //println(("step-myfreqPrefixes-after local processing", (System.nanoTime()-start)/1000000000)) //
       //throw new NotImplementedError("operation not yet implemented")
       // Union local frequent patterns and distributed ones.
       freqPatterns = freqPatterns ++ distributedFreqPattern
+      /*
+      println("distributedFreqPattern=")
+      distributedFreqPattern.foreach{p=>
+        println(p.toString())
+      }
+      println("freqPatterns=")
+      freqPatterns.foreach{p=>
+        println(p.toString())
+      }
+      */
     }
     freqPatterns
   }
@@ -407,7 +429,7 @@ object MyPrefixSpan extends Logging {
     * @param items items in this prefix, using the internal format
     * @param length length of this prefix, not counting 0
     */
-  private[patterns] class Prefix(val items: Array[Int], val length: Int, val instances: mutable.Map[Long, Set[Item]])
+  private[patterns] class Prefix(val items: Array[Int], val length: Int, val instances: mutable.Map[Long, mutable.SortedSet[Item]])
     extends Serializable {
     /** A unique id for this prefix. */
     val id: Int = Prefix.nextId
@@ -419,16 +441,16 @@ object MyPrefixSpan extends Logging {
       "PreFix: items="+items.mkString("[",",","]")+", instances="+instances.mkString("[",",","]")
     }
 
-    def mergeTimely(newInstances: mutable.Map[Long, Set[Item]], currLength:Int, newLength:Int, maxDTofPatterns: Int)
-      :mutable.Map[Long, Set[Item]] = {
+    def mergeTimely(newInstances: mutable.Map[Long, mutable.SortedSet[Item]], currLength:Int, newLength:Int, maxDTofPatterns: Int)
+      :mutable.Map[Long, mutable.SortedSet[Item]] = {
       //var log = LogManager.getRootLogger
       //log.warn("m merging:currentInstances="+instances.mkString("[",",","]")+" and newInstances="+newInstances.mkString("[",",","]"))
-      var result:mutable.Map[Long, Set[Item]] = mutable.Map.empty
+      var result:mutable.Map[Long, mutable.SortedSet[Item]] = mutable.Map.empty
       if (instances.nonEmpty){
         newInstances.keys.foreach(newTraj=>{
           if (instances.contains(newTraj)){ //expected to be always true
             var newInstancesItems = newInstances(newTraj).toBuffer.sorted
-            var newSetInstances: Set[Item]=Set.empty
+            var newSetInstances: mutable.SortedSet[Item]=mutable.SortedSet.empty
             while (newInstancesItems.nonEmpty){
               var newInstancesTimesArray = newInstancesItems.take(newLength)
               var newInstancesTimesFirst = newInstancesTimesArray.head
@@ -467,7 +489,7 @@ object MyPrefixSpan extends Logging {
     }
 
     /** Expands this prefix by the input item. */
-    def :+(item: Int, newInstances: mutable.Map[Long,  Set[Item]], maxDTofPatterns: Int): Prefix = {
+    def :+(item: Int, newInstances: mutable.Map[Long,  mutable.SortedSet[Item]], maxDTofPatterns: Int): Prefix = {
       require(item != 0)
       //var log = LogManager.getRootLogger
       //log.warn("m prefix="+this.items.mkString("[",",","]")+", new item="+item )
@@ -572,11 +594,11 @@ object MyPrefixSpan extends Logging {
       *         indicates a partial prefix item, which should be assembled to the last itemset of the
       *         current prefix. Otherwise, the item should be appended to the current prefix.
       */
-    def genPrefixItems: Iterator[(Int, (Long, Set[Item]))] = {
+    def genPrefixItems: Iterator[(Int, (Long, mutable.SortedSet[Item]))] = { //mutable.SortedSet
       val n1 = items.length - 1
       // For each unique item (subject to sign) in this sequence, we output exact one split.
       // TODO: use PrimitiveKeyOpenHashMap
-      val prefixes = mutable.Map.empty[Int, (Long, Set[Item])]
+      val prefixes = mutable.Map.empty[Int, (Long, mutable.SortedSet[Item])]
       // a) items that can be assembled to the last itemset of the prefix
       partialStarts.foreach { start =>
         var i = start
@@ -584,7 +606,7 @@ object MyPrefixSpan extends Logging {
         while (x != 0) {
           if (!prefixes.contains(x)) {
             if ( this.prevTimestamp == -1 || items(i).time - this.prevTimestamp <= this.maxDTofPatterns ) {
-              prefixes(x) = (n1 - i, Set(items(i)))
+              prefixes(x) = (n1 - i, mutable.SortedSet(items(i)))
             }
           }
           i += 1
@@ -598,16 +620,23 @@ object MyPrefixSpan extends Logging {
         if (x != 0 ) {
           if( !prefixes.contains(x) ) {
             if ( this.prevTimestamp == -1 || items(i).time - this.prevTimestamp <= this.maxDTofPatterns ){
-              prefixes(x) = (n1 - i, Set(items(i)))
+              //println("in genPrefixItems,postfix="+this.toString +" add set"+Set(items(i)).mkString("[",",","]"))
+              prefixes(x) = (n1 - i, mutable.SortedSet(items(i)))
             }
           }else{// prefix x exists in prefixes but in full project, postfix size is larger if x is found again in postfix
             var newsize = prefixes(x)._1 + (n1-i)
-            var newInstances = prefixes(x)._2++Set(items(i))
+            var newInstances = prefixes(x)._2++mutable.SortedSet(items(i))
+            if (this.sequenceId==5993630) {
+              //println("in genPrefixItems, overwrite set pre" + prefixes(x)._2.mkString("[", ",", "]")) //postfix="+this.toString +"
+              //println("in genPrefixItems, overwrite set new" + Set(items(i)).mkString("[", ",", "]"))
+              //println("in genPrefixItems, overwrite set after" + newInstances.mkString("[", ",", "]"))
+            }
             prefixes(x) = (newsize, newInstances)// overwrite previous
           }
         }
         i += 1
       }
+      //println("in genPrefixItems, prefixes before iterator=" + prefixes.mkString("[", ",", "]"))
       prefixes.toIterator
     }
 

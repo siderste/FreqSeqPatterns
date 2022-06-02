@@ -33,7 +33,6 @@ object MainDraft extends Serializable{
     var start=System.nanoTime()
     var datasetInitial = DataPreprocessing.readInput(spark, params)//.repartition(10).cache()
       //.limit(2000)
-    //clean the database from:
 
     val datasetStatistics = DataPreprocessing.calcStatistics(spark, datasetInitial, params)
     datasetStatistics.updMinMaxNomDims()
@@ -141,6 +140,7 @@ object MainDraft extends Serializable{
     //val prefixSpanPatternsRDD = FreqSeqPatterns.discoverFreqSeqPatternsOrig(sequences, bcDatasetStatistics.value.params)
     //TODO what about Dt, inside prefixspan or segment trajectories in preprocessing???
     timings.put("step3", (System.nanoTime()-start)/1000000000)
+
 
     start=System.nanoTime()
     //val datasetPatternsTransitions2 = spark.read.table("TableName");

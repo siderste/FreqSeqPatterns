@@ -102,14 +102,20 @@ private[patterns] class MyLocalPrefixSpan(
   }
 
   // find frequent items
-  private def findFrequentItems(postfixes: Array[Postfix]): mutable.Map[Int, mutable.Map[Long, Set[Item]]] ={
-    val counts = mutable.Map.empty[Int, mutable.Map[Long, Set[Item]]] // counts(prefix->(seqid->[items]))
+  private def findFrequentItems(postfixes: Array[Postfix]): mutable.Map[Int, mutable.Map[Long, mutable.SortedSet[Item]]] ={
+    val counts = mutable.Map.empty[Int, mutable.Map[Long, mutable.SortedSet[Item]]] // counts(prefix->(seqid->[items]))
     postfixes.foreach { postfix =>
       postfix.genPrefixItems.foreach { case (x, sizeAndInstances) =>
         if ( counts.contains(x) ){
+          //println("sizeAndInstances=" + sizeAndInstances._2.mkString("[", ",", "]"))
           // TODO should mapA++mapB is enough ?? or => instances=instancesA++instancesB.map{case(k,v)=>k->(v++instancesA.getOrElse(k ,Iterable.Empty))}
           if (counts(x).contains(postfix.sequenceId)){
+            if (postfix.sequenceId==5993630) {
+              //println("counts instances=" + counts(x).apply(postfix.sequenceId).mkString("[", ",", "]"))
+              //println("sizeAndInstances._2 instances=" + sizeAndInstances._2.mkString("[", ",", "]"))
+            }
             counts(x).apply(postfix.sequenceId)++=sizeAndInstances._2
+            //println("counts after instances="+counts(x).apply(postfix.sequenceId).mkString("[",",","]"))
           }else{
             counts(x).put(postfix.sequenceId, sizeAndInstances._2)
           }
@@ -132,19 +138,19 @@ private object MyLocalPrefixSpan {
     * @param items items in the prefix in reversed order
     * @param length length of the prefix, not counting delimiters
     */
-  class ReversedPrefix private (val items: List[Int], val length: Int, val instances: mutable.Map[Long, Set[Item]])
+  class ReversedPrefix private (val items: List[Int], val length: Int, val instances: mutable.Map[Long, mutable.SortedSet[Item]])
     extends Serializable {
 
-    def merge(newInstances: mutable.Map[Long, Set[Item]], currLength:Int, newLength:Int, maxDTofPatterns: Int)
-    :mutable.Map[Long, Set[Item]] = {
+    def merge(newInstances: mutable.Map[Long, mutable.SortedSet[Item]], currLength:Int, newLength:Int, maxDTofPatterns: Int)
+    :mutable.Map[Long, mutable.SortedSet[Item]] = {
       //var log = LogManager.getRootLogger
       //log.warn("d merging:currentInstances="+instances.mkString("[",",","]")+" and newInstances="+newInstances.mkString("[",",","]"))
-      var result:mutable.Map[Long, Set[Item]] = mutable.Map.empty
+      var result:mutable.Map[Long, mutable.SortedSet[Item]] = mutable.Map.empty
       if (instances.nonEmpty){
         newInstances.keys.foreach(newTraj=>{
           if (instances.contains(newTraj)){ //expected to be always true
             var newInstancesTimes = newInstances(newTraj).toBuffer.sorted
-            var newInstancesSet: Set[Item]=Set.empty
+            var newInstancesSet: mutable.SortedSet[Item]=mutable.SortedSet.empty
             while (newInstancesTimes.nonEmpty){
               var newInstancesTimesArray = newInstancesTimes.take(newLength)
               var newInstancesTimesFirst = newInstancesTimesArray.head
@@ -185,7 +191,7 @@ private object MyLocalPrefixSpan {
     /**
       * Expands the prefix by one item.
       */
-    def :+(item: Int, newInstances: mutable.Map[Long, Set[Item]], maxDTofPatterns: Int): ReversedPrefix = {
+    def :+(item: Int, newInstances: mutable.Map[Long, mutable.SortedSet[Item]], maxDTofPatterns: Int): ReversedPrefix = {
       require(item != 0)
       //var log = LogManager.getRootLogger
       //log.warn("d prefix="+items.mkString("[",",","]")+", new item="+item )

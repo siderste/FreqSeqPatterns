@@ -53,13 +53,11 @@ object MyUtils extends Serializable {
     var datasetBinary = datasetInitial
     var validColumnsNames = datasetStatistics.params.getPropertyValue("validColumnsNames").split(",")
     import org.apache.spark.sql.functions._
-
     def rangeizeUDF(dim: String) = udf( (d: Double) => {
       val mind = datasetStatistics.dimsNumStats.apply("min_" + dim)
       val vard = datasetStatistics.dimsNumStats.apply("var_" + dim)
       Math.floor( ((d-mind)/vard) )//indexes on OneHotEncoderEstimator start from 0 to ....
     }, DoubleType)
-
     for ( c <- 0 to validColumnsNames.size-1) {
       val validCol = validColumnsNames(c)
       val colType = datasetBinary.dtypes.filter{ case (name, dtype) => validCol == name }
@@ -79,13 +77,11 @@ object MyUtils extends Serializable {
         }
       }
     }
-
     validColumnsNames = validColumnsNames.map(validCol=>validCol+"_vec")
     var datasetReady = new VectorAssembler().setInputCols(validColumnsNames)
       .setOutputCol("features").transform(datasetBinary)
       .withColumn("rid", concat_ws(",",col("d_0"), col("d_1")))
       .drop(validColumnsNames:_*)
-
     datasetReady
   }
 

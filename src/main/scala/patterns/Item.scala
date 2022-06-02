@@ -12,7 +12,7 @@ case class Item (time: Long = -1, area_id: Int = 0, spatial: Array[Double] = Arr
   extends Logging with Serializable with Ordered[Item]{
 
   override def toString: String = {
-    "("+area_id+", "+time+", "+spatial+")"
+    "("+area_id+", "+time+", "+spatial.mkString("Array(", ", ", ")")+")"
   }
   object Item {
 
